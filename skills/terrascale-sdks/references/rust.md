@@ -109,7 +109,9 @@ request already accepted by the server.
 
 Use `error.sql()` rather than matching only `Error::Sql`: REST errors can be
 wrapped in `Error::Response`, while session SQL errors are direct. `SqlError`
-has `code`, `statement`, `sqlstate`, optional `status`, and `is_transient()`.
+has `code`, `message`, `statement`, optional `sqlstate`, and `is_transient()`.
+Read HTTP status from the enclosing `error.status()` (`Option<u16>`), not from
+`error.sql()`: `SqlError` has no `status` field. A session SQL error has no HTTP status.
 `Error::CommitUncertain` is terminal for the session; use a new connection to
 reconcile. Without a committing request, a lost transaction can be cleared
 with `rollback().await` before reconnection. Sources:
@@ -117,4 +119,6 @@ with `rollback().await` before reconnection. Sources:
 [errors](https://docs.terrascale.tech/guides/errors).
 Source audit: `sdk/rust/README.md`, `Cargo.toml`, `src/v1/client.rs`,
 `sql_exec.rs`, `sql_session.rs`, `errors.rs`, `ids.rs` at the revision in
-[the skill](../SKILL.md). Source dependency availability does not establish a release.
+[the skill](../SKILL.md); the SQL fields and enclosing `Error::status()` were
+rechecked at `6b786568d60373e2fa16836a8ab4354bbb642651`.
+Source dependency availability does not establish a release.
