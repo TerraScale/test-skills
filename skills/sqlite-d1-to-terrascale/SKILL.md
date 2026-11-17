@@ -104,17 +104,12 @@ sqlite3 app.db .dump > "$MIGRATION_DIR/original.sql"
 ```
 
 Use the actual authoritative path in place of `app.db`. Wait for successful exit
-before importing; treat an interrupted or failed export as invalid. The
-[TerraScale file import path](https://docs.terrascale.tech/guides/import) also documents:
-
-```bash
-set -o pipefail
-sqlite3 app.db .dump | ts -project "$TERRASCALE_PROJECT_ID" db import "$TERRASCALE_DATABASE_NAME" -
-```
-
-Prefer the saved artifact for a production migration so it can be inspected,
-checksummed and resumed. TerraScale does not open, attach, or replicate a local
-`.db` file; the direct path above still dumps to SQL first, per the import guide.
+before preparing/importing; treat an interrupted or failed export as invalid.
+The [public import guide](https://docs.terrascale.tech/guides/import) shows a raw
+`.dump` pipeline, but do not execute it with the reviewed CLI: its importer passes
+transaction wrappers unchanged and splits trigger bodies. Prepare the artifact
+in step 4 instead; the reference documents the implementation discrepancy.
+TerraScale does not open, attach, or replicate a local file, per the import guide.
 
 ### Cloudflare D1
 
@@ -131,22 +126,24 @@ plan. Check the command exit status and preserve the original artifact.
 
 ## 4. Convert and import SQL
 
-- [ ] Preserve `original.sql` and make the import working copy:
-
-```bash
-cp "$MIGRATION_DIR/original.sql" "$MIGRATION_DIR/source.sql"
-```
-
-- [ ] Review `source.sql` for unsupported SQL, extension objects,
-  service bookkeeping and dependency ordering. Parse SQL statements correctly,
-  including triggers and embedded semicolons; do not split on semicolon characters.
-- [ ] Use the documented [CLI importer](https://docs.terrascale.tech/guides/import)
-  for a compatible dump; it handles batching:
+- [ ] Preserve `original.sql`. Follow the required
+  [artifact preparation](references/worker-and-features.md#prepare-the-cli-artifact)
+  to produce `source.sql`: remove complete top-level dump transaction controls
+  and pragmas, and extract complete trigger DDL into separate reviewed files.
+  This applies to both file dumps and D1 exports; the CLI does not normalize them.
+- [ ] Review the prepared artifact for unsupported SQL, extension objects, service
+  bookkeeping and dependency ordering. Parse complete SQL statements, including
+  trigger bodies and quoted semicolons; do not split on semicolon characters.
+- [ ] Use the [CLI importer](https://docs.terrascale.tech/guides/import) only for
+  the prepared, trigger-free artifact; it handles batching:
 
 ```bash
 ts -project "$TERRASCALE_PROJECT_ID" db import "$TERRASCALE_DATABASE_NAME" "$MIGRATION_DIR/source.sql"
 ```
 
+- [ ] Verify loaded rows before installing each reviewed trigger as one complete
+  HTTP statement using the reference example. Then verify trigger definitions
+  and side effects. Never pass trigger files to `ts db import`.
 - [ ] Import is not one atomic transaction. Earlier batches remain committed on
   failure. Keep the exact artifact and the reported first statement of the failed
   batch; resume with `-from <n>` only after confirming that batch did not commit.
@@ -159,8 +156,9 @@ ts -project "$TERRASCALE_PROJECT_ID" db import "$TERRASCALE_DATABASE_NAME" "$MIG
   cannot fix it. See [batch import](https://docs.terrascale.tech/guides/import)
   and [limits](https://docs.terrascale.tech/limits).
 - [ ] Do not send dump transaction wrappers as raw HTTP statements. An HTTP request
-  is its own transaction; `BEGIN`, `COMMIT` and `ROLLBACK` are refused. Use the CLI
-  importer or construct actual statement batches following
+  is its own transaction; `BEGIN`, `COMMIT` and `ROLLBACK` are refused. Neither
+  the current CLI nor HTTP strips these controls; remove dump wrappers before
+  constructing actual statement batches following
   [SQL over HTTP](https://docs.terrascale.tech/guides/sql-http).
 
 ## 5. Replace application access and recovery

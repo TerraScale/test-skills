@@ -149,6 +149,59 @@ within the rollout plan. For gradual deployment use the versioned-secret path in
 Keep development secret files ignored by Git. Remove `env.DB` only after all
 callers have moved and the rollback plan retains the old binding configuration.
 
+## Prepare the CLI artifact
+
+The [public import guide](https://docs.terrascale.tech/guides/import) shows raw
+`.dump` input, but the reviewed CLI contradicts that shortcut:
+[import.go](https://github.com/TerraScale/terrascale/blob/6b786568d60373e2fa16836a8ab4354bbb642651/sdk/go/cmd/ts/import.go#L31)
+forwards split statements unchanged, and
+[splitSQL](https://github.com/TerraScale/terrascale/blob/6b786568d60373e2fa16836a8ab4354bbb642651/sdk/go/cmd/ts/migrate.go#L398)
+splits trigger bodies at their internal semicolons. The
+[HTTP contract](https://docs.terrascale.tech/guides/sql-http) refuses transaction
+wrappers; [SQL](https://docs.terrascale.tech/concepts/sql) always enforces foreign
+keys. Do not assume the CLI strips controls or preserves complete trigger DDL.
+
+Before any CLI import, use a SQL-aware parser or review complete statements:
+
+1. Keep the original successful export unchanged. Reject truncated/failed dumps
+   and dumps that end in `ROLLBACK`; do not turn an aborted dump into a partial load.
+2. Remove complete top-level dump `BEGIN`/`COMMIT` controls and all source `PRAGMA`
+   statements from the import copy. Inspect each removed pragma for behavior that
+   needs a schema/load-order change. Never strip words inside strings or triggers.
+3. Extract every complete `CREATE TRIGGER ... BEGIN ... END;` to its own reviewed
+   file. Do not put trigger DDL into the CLI artifact, even if it is supported SQL.
+4. Produce `source.sql` containing reviewed tables, inserts, indexes and views,
+   ordered for enforced foreign keys. Resolve other unsupported source statements.
+   Verify there are no dump controls, pragmas or trigger declarations left.
+5. Rehearse this exact artifact through the installed CLI into an empty target.
+   After importing and verifying rows, submit each complete trigger as one SDK/HTTP
+   statement, within the [statement limits](https://docs.terrascale.tech/limits).
+   Keep separate progress for trigger installation; a failed DDL call does not undo
+   already committed data batches.
+
+For example, given source dump controls, an audit table, a customer table, data,
+and an audit trigger, the prepared CLI artifact can contain only:
+
+```sql
+CREATE TABLE customers (id TEXT PRIMARY KEY, email TEXT NOT NULL);
+CREATE TABLE audit (id TEXT NOT NULL);
+INSERT INTO customers VALUES ('c1', 'team@example.com');
+```
+
+After row verification, submit the entire following string as one statement.
+Its internal semicolon stays inside the string sent to the SQL endpoint:
+
+```js
+await execute(env, [{
+  sql: "CREATE TRIGGER customer_audit AFTER INSERT ON customers BEGIN INSERT INTO audit(id) VALUES (new.id); END;",
+}]);
+```
+
+Here `execute` is the HTTP helper above. Run this once from a controlled migration
+entry point with the destination secret environment, never on normal requests.
+Verify subsequent customer inserts create exactly one expected audit row. Check
+for an existing trigger before resuming an uncertain DDL outcome.
+
 ## Recovery comparison
 
 D1 [Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)

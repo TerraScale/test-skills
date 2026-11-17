@@ -98,23 +98,29 @@ ts -project "$TERRASCALE_PROJECT_ID" db create "$TERRASCALE_DATABASE_NAME"
 umask 077
 mkdir -p "$MIGRATION_DIR"
 turso db shell "$TURSO_DATABASE" .dump > "$MIGRATION_DIR/original.sql"
-cp "$MIGRATION_DIR/original.sql" "$MIGRATION_DIR/source.sql"
 ```
 
-- [ ] Preserve `original.sql`. Review `source.sql` as complete SQL statements,
-  including triggers and quoted strings; never split SQL with `split(";")`.
-  Resolve extension functions, internal metadata, foreign-key load ordering, and
-  unsupported pragmas in that copy. Test transformed values against the source.
-- [ ] Import into the empty target using
-  [From an existing SQLite file / Load rows in batches](https://docs.terrascale.tech/guides/import):
+- [ ] Preserve `original.sql`. Follow the required
+  [artifact preparation](references/client-and-features.md#prepare-the-cli-artifact)
+  to produce `source.sql`: remove complete top-level dump transaction controls and
+  pragmas, and keep complete trigger DDL in separate reviewed files. The current
+  CLI does not normalize wrappers or preserve trigger bodies; the reference
+  explains the discrepancy with the public import guide.
+- [ ] Resolve extension functions, internal metadata and foreign-key load ordering
+  in the prepared artifact. Test transformed values against the source.
+- [ ] Import only the prepared, trigger-free artifact into the empty target using
+  [batched import](https://docs.terrascale.tech/guides/import):
 
 ```bash
 ts -project "$TERRASCALE_PROJECT_ID" db import "$TERRASCALE_DATABASE_NAME" "$MIGRATION_DIR/source.sql"
 ```
 
-- [ ] For an unchanged, rehearsed fleet, use the manifest loop in
-  [the reference](references/client-and-features.md#fleet-copy). If transformations
-  are needed, prepare and review each tenant’s import artifact before loading it.
+- [ ] Verify loaded rows before installing each complete reviewed trigger through
+  the single-statement SDK path in the reference. Check trigger definitions and
+  side effects afterward; never pass trigger files to `ts db import`.
+- [ ] For a fleet, use the reference’s separate export and prepared-import loops.
+  Prepare and rehearse every tenant’s artifacts, including dump controls and
+  trigger separation, before starting the final import pass.
 - [ ] The CLI commits batches independently. Save its failed-batch statement
   number and the exact input artifact. Resume with `-from <n>` only after
   confirming the failed batch did not commit; otherwise reconcile the target or
