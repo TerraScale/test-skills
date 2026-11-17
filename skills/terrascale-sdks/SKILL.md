@@ -79,6 +79,8 @@ Sources: [SDK reference](https://docs.terrascale.tech/guides/sdks),
 
 - [ ] For released Go `v0.0.27`, use `v1.New(Config{APIKey: key})`; its tag lacks
   `NewFromEnvironment`, `RegionPin` and `TSAuthBaseURL`. Those require newer source.
+  Named statement helpers and uncertain-write recovery also differ; read the
+  [Go release guidance](references/go.md) before implementing error handling.
 - [ ] Use the public API origin `https://api.terrascale.tech` by default;
   `TERRASCALE_BASE_URL` is an optional override in all five environment clients.
 - [ ] JS, Python and Rust read the project from `TERRASCALE_PROJECT_ID`.
@@ -277,10 +279,13 @@ an outcome is uncertain. Source: [uncertain writes](https://docs.terrascale.tech
 Before a WebSocket exists, 429/503 with parseable `Retry-After` can be retried:
 no SQL was sent. Current source permits three overload attempts with waits capped
 at 30 seconds within the connection deadline. JS needs a compatible WebSocket
-implementation such as `ws` to expose upgrade refusals. An unanswered committing
-session request permanently closes that session with its uncertain error;
-use a new session to reconcile. See [errors](https://docs.terrascale.tech/guides/errors)
-and the language references for the source-checked session details.
+implementation such as `ws` to expose upgrade refusals. Current source permanently
+fails a session after an unanswered committing request. Released Go `v0.0.27`
+does not guarantee this: detect both uncertain codes, explicitly close/discard
+the session and reconcile through a new connection. A later local rollback
+response must not override the original uncertainty. See
+[errors](https://docs.terrascale.tech/guides/errors) and the
+[Go release guidance](references/go.md) for the source-checked differences.
 
 ## 6. Verify the integration and change over
 

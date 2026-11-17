@@ -121,8 +121,10 @@ Expected: `Ada` then `primary_key_violation 0 23505`. Sources:
 
 `Execute(ctx, sql, args ...any)` and `Query` take variadic positional values,
 not one slice argument. Expand a prepared `[]any` with `args...`.
-Named values use `ExecuteStatement(ctx, tb.Statement{SQL: ..., Named: ...})`
-or `Batch`. `QueryAs[T]` is a package function, not a generic database method.
+For named values in `v0.0.27`, use `Batch` with `tb.Statement.Named`, as above,
+or `Execute(ctx, sqlText, sql.Named("name", value))` with a `database/sql` import.
+`ExecuteStatement` exists only in newer source, not the installed `v0.0.27`.
+`QueryAs[T]` is a package function, not a generic database method.
 `Row.Scan(&value, ...)` reads positional columns and returns an error to check.
 Sources: [Go](https://docs.terrascale.tech/getting-started/go),
 [SQL HTTP](https://docs.terrascale.tech/guides/sql-http).
@@ -134,11 +136,40 @@ commits on nil and rolls back on a callback error. Explicit `Begin`, `Commit`,
 
 Use `errors.As` for `*tb.SQLError` (`Code`, `Statement`, `SQLState`, `Status`)
 and `*tb.APIError` (`Status`, `Code`, `RetryAfter`, `RequestID`).
-Use `errors.Is(err, tb.ErrCommitUncertain)` before any replay decision: it also
-matches `write_outcome_unknown`. Lost committing replies close the session;
-noncommitting lost transactions must be cleared with `Rollback` before reuse.
+For `v0.0.27`, classify both `commit_uncertain` and `write_outcome_unknown` before
+any replay decision. Its `SQLError.Is` only matches its own code; do not rely on
+`errors.Is(err, tb.ErrCommitUncertain)` alone for a session SQL error. With the
+existing `errors` and `tb` imports, use:
+
+```go
+func uncertainWrite(err error) bool {
+    var sqlErr *tb.SQLError
+    if errors.As(err, &sqlErr) {
+        return sqlErr.Code == tb.ErrCommitUncertain || sqlErr.Code == tb.ErrWriteOutcomeUnknown
+    }
+    return errors.Is(err, tb.ErrCommitUncertain) || errors.Is(err, tb.ErrWriteOutcomeUnknown)
+}
+```
+
+Inspect the SQL error first instead of traversing its absent API-error wrapper.
+After either uncertain code or a lost potentially committing reply, explicitly
+`Close()` and discard the session. Reconcile the expected state through a new
+connection before deciding whether to repeat the write. The complete example
+returns transaction errors and closes its session through `defer`; it never replays.
+
+The released session can retain a reconnect path after a lost committing reply.
+A later local `transaction_rolled_back` response or successful `Rollback` is not
+proof that the earlier uncertain commit rolled back. Never clear that uncertainty
+by reusing the session. Only a transaction known to have lost no committing
+request may use `Rollback` to clear lost-transaction state before reuse.
+
+Newer source makes `SQLError.Is` match `ErrCommitUncertain` for
+`write_outcome_unknown` and permanently fails the session after a lost committing
+reply. These guarantees do not apply to `v0.0.27`.
 Do not log credentials or argument values when reporting request metadata.
 Source: [safe retries](https://docs.terrascale.tech/guides/errors).
 Source audit: `sdk/go/README.md`, `v1/client.go`, `database.go`, `sql_execute.go`,
 `sql_session.go`, `errors.go`, `ids.go`, and `tsauth` at the revision in
-[the skill](../SKILL.md). Source-only methods require a source dependency.
+[the skill](../SKILL.md). The named-argument and recovery differences were also
+checked against tag `sdk/go/v0.0.27` and source commit
+`6b786568d60373e2fa16836a8ab4354bbb642651`. Source-only methods require a source dependency.
