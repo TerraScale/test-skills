@@ -27,7 +27,7 @@ plan around it, do not wait for it.
 
 | Supabase Auth | TerraScale | Source |
 | --- | --- | --- |
-| TOTP factor ([Supabase][sb-mfa]) | TOTP second factor with recovery codes on the hosted pages. Factors cannot be imported: users enroll again, and until they do they sign in with one factor | [capabilities][cap], [served OpenAPI][openapi] (import has no factor field) |
+| TOTP factor ([Supabase][sb-mfa]) | TOTP second factor with recovery codes on the hosted pages. Factors cannot be imported. Import these users without a password hash so a password alone never opens their account; they sign in with an email code and enroll TOTP again | [capabilities][cap], [served OpenAPI][openapi] (import has no factor field) |
 | Phone (SMS) factor | Not available. Users switch to TOTP | [capabilities][cap] |
 | WebAuthn factor | Passkeys are documented for TerraScale accounts only. Plan TOTP for end users | [capabilities][cap] |
 | `aal` claim, `aal2` enforcement in RLS | No documented equivalent claim. The hosted pages run the second factor for users who enrolled; enforce "must have MFA" in your own product flow | [end-user auth][eua] |
@@ -86,8 +86,8 @@ One line each, with the workaround used by this skill.
 
 - Import cannot keep Supabase UUIDs as user ids: store them in `external_id` and rewrite foreign keys from a map.
 - Import cannot carry linked social identities: those users sign in with an email code once, then connect the provider.
-- Import cannot carry MFA factors: users enroll TOTP again after the cutover.
-- No route sets or clears a password hash after import: freeze password changes between the final export and the switch.
+- Import cannot carry MFA factors: those users are imported without a password hash, sign in with an email code and enroll TOTP again.
+- No route sets or clears a password hash after import: a delta pass deletes and re-imports every user who changed after the export, until it finds none.
 - Password sign-in does not require `email_verified`: never import a hash for an unconfirmed address.
 - No phone or SMS sign-in: collect emails before the cutover.
 - No anonymous or guest accounts for setup: do not migrate anonymous users.

@@ -129,7 +129,8 @@ Who gets which path:
 | Confirmed email, no password (magic link, OTP, social only) | No hash, `email_verified: true` | Email code; social users then connect their provider |
 | Unconfirmed email | No hash, `email_verified: false`, or skip it | Email code proves the mailbox |
 | Hash refused by the import | Re-send the row without the hash | Password reset from the hosted page |
-| Banned (`banned_until` in the future) | No hash, then disable | Cannot sign in |
+| Verified MFA factor (`auth.mfa_factors`) | No hash; `email_verified` as confirmed | Email code, then enroll TOTP again; a password alone never signs them in |
+| Banned (`banned_until` in the future) | No hash; the import script disables the account right after its batch | Cannot sign in |
 
 When a hash cannot be imported, the options are, with their trade-offs:
 
@@ -167,12 +168,13 @@ Do this in the rehearsal project first, then repeat it in production.
 Follow [references/user-export.md](references/user-export.md) end to end, first against the rehearsal project:
 
 1. Export the eligible users to `users.ndjson` with the SQL there (deleted, anonymous, email-less and SSO users
-   excluded; hashes only for confirmed, non-banned users with a canonical bcrypt hash).
+   excluded; hashes only for confirmed, non-banned users without a verified MFA factor and with a canonical
+   bcrypt hash), plus `fingerprints.csv` for the delta pass.
 2. Run the import script. It writes `mapping.csv` (Supabase UUID, TerraScale id) and `import-errors.ndjson`
-   (indexes and codes, never hashes).
+   (indexes and codes, never hashes), and disables banned users right after each batch.
 3. Reconcile every `user_conflict`: an account you imported earlier (same `external_id`) joins the mapping; an
    account someone else created is **never merged automatically**. Review it by hand.
-4. Disable banned users and set `custom_claims` (step 5).
+4. Set `custom_claims` and re-check the disables (step 5).
 
 **STOP** if mapped users plus deliberately skipped users differ from the export count. Find the missing rows first.
 
@@ -247,6 +249,10 @@ id, and `auth.uid` is the token's `sub` ([user profiles][profiles], [rules][rule
 - [ ] A seeded test user created in Supabase with a known password before the export signs in at TerraScale
   with that password, then signs in again (now on Argon2id).
 - [ ] An unconfirmed test user has no working password and can sign in only with an email code.
+- [ ] A test user with a verified Supabase TOTP factor has no working password at TerraScale, signs in with an
+  email code and enrolls TOTP again.
+- [ ] A test user whose password changes in Supabase after the export is found by the delta pass, re-imported,
+  and only the new password works.
 - [ ] A Google (or other social) test user signs in with an email code, connects the provider on the security
   page, then signs in with the provider.
 - [ ] A user with a refused hash resets the password on the hosted page.
@@ -265,19 +271,27 @@ Users signed in at Supabase cannot carry their session over: the import moves no
 
 1. **Announce** the date and that everyone signs in once more; social-only users sign in with an email code and
    reconnect their provider; MFA users enroll again.
-2. **Freeze Supabase auth writes**: turn off "Allow new users to sign up" ([Supabase][sb-config]) and ship an
-   app build that hides password change and email change. A password changed after the export would leave the
-   old hash working at TerraScale, and the import cannot replace a hash later.
-3. **Final export and import** into production (step 4), then claims and disables (step 5). At about 5000 users a
-   minute (500 rows, ten calls a minute), 100000 users take about 20 minutes plus reconciliation.
-4. **Fill the id columns** again for rows written since the rehearsal, then move the data
-   (`supabase-database-to-terrascale`).
-5. **Switch the application** to the TerraScale issuer. From now on a Supabase token is refused and the user is
+2. **Reduce Supabase auth writes**: turn off "Allow new users to sign up" ([Supabase][sb-config]) and ship an
+   app build that hides password change and email change. This is not a freeze: Supabase's auth API still
+   accepts password resets and `updateUser` from old app versions and from anyone holding the anon key. The
+   delta pass below is what makes the import current.
+3. **Final export and import** into production (step 4), then claims (step 5). At about 5000 users a minute
+   (500 rows, ten calls a minute), 100000 users take about 20 minutes plus reconciliation.
+4. **Delta pass until zero** ([references/user-export.md](references/user-export.md#7-delta-pass-before-the-switch)):
+   find every user whose password hash, email, confirmation, ban, MFA state or `app_metadata` changed since
+   their import, or who was deleted or created since; delete and re-import them while no TerraScale data
+   exists for them. Repeat until the pass finds nothing. **STOP** and do not switch while it finds anything.
+5. **Fill the id columns** again (reloaded map) for rows written since the rehearsal, then move the data
+   (`supabase-database-to-terrascale`). Run one more delta pass; it must find zero.
+6. **Switch the application** to the TerraScale issuer. From now on a Supabase token is refused and the user is
    sent to the hosted sign-in.
-6. **Stop old clients writing**: mobile apps you cannot force-update still hold Supabase sessions. Revoke the
-   Data API roles' writes in Supabase (SQL in [references/user-export.md](references/user-export.md#7-cut-over-and-roll-back)).
-7. **Turn TerraScale sign-up on** if the app allows sign-up.
-8. Watch sign-in errors, `invalid_grant` rates and support tickets for a week.
+7. **Last delta pass right after the switch**. A user it finds changed in Supabase in the last minutes: disable
+   the TerraScale account at once (ends sessions), then support confirms the person, deletes and re-imports the
+   account and rewrites that user's few TerraScale rows to the new id.
+8. **Stop old clients writing**: mobile apps you cannot force-update still hold Supabase sessions. Revoke the
+   Data API roles' writes in Supabase (SQL in [references/user-export.md](references/user-export.md#8-cut-over-and-roll-back)).
+9. **Turn TerraScale sign-up on** if the app allows sign-up.
+10. Watch sign-in errors, `invalid_grant` rates and support tickets for a week.
 
 The point of no return is the first write to TerraScale by a migrated user. Before it, rollback is a config
 switch; after it, rollback needs a reverse data move.
@@ -286,19 +300,27 @@ switch; after it, rollback needs a reverse data move.
 
 - **Before any TerraScale write**: point the app back to Supabase, grant the writes back, turn Supabase sign-up
   on. Nothing in Supabase was deleted or changed except the additive id columns.
-- **After TerraScale writes**: freeze TerraScale sign-up, map new rows back with `auth_user_map`, and create
-  users who signed up at TerraScale in Supabase with the admin API ([Supabase admin createUser][sb-admin]). Their
-  passwords cannot move back (export has no hashes, [end-user auth][eua]): they reset at Supabase.
+- **After TerraScale writes**: freeze TerraScale sign-up, move the data back, then in this order
+  ([references/user-export.md](references/user-export.md#8-cut-over-and-roll-back)):
+  1. Create each user who signed up at TerraScale (not in `auth_user_map`) in Supabase with the admin API and
+     `email_confirm: true` ([Supabase admin createUser][sb-admin]); TerraScale sign-ups proved their address at
+     account creation ([end-user auth][eua]).
+  2. Insert each new pair (new Supabase UUID, TerraScale id) into `migration.auth_user_map`.
+  3. Backfill every `user_id` column from its `user_ts_id` through the map, then check the orphan count is zero.
+  4. Ask **every** rolled-back user to reset the password: TerraScale exports no hashes ([end-user auth][eua]),
+     so a password changed at TerraScale does not move back, and Supabase still holds the old one.
 - **Halfway failure** (import stopped, mapping incomplete): do not switch the app. The import is per-row, so
   reconcile and resume; or delete the TerraScale users you created (`DELETE /v1/{project}/users/{user}`,
-  [end-user auth][eua]) and start over. Supabase is the source of truth until step 8.5.
+  [end-user auth][eua]) and start over. Supabase is the source of truth until step 8.6.
 - Keep the Supabase project, its OAuth clients and the old id columns for at least one full session lifetime
   (14 days by default) after the switch.
 
 ## Risk review (what a reviewer will ask)
 
-- **Account takeover during migration**: no hash for unconfirmed or banned accounts; `email_verified` copied,
-  never upgraded; sign-up off during import; conflicts reviewed by hand, never merged by email; TerraScale
+- **Account takeover during migration**: no hash for unconfirmed, banned or MFA-protected accounts (a password
+  alone must not open an account that needed a second factor); banned accounts disabled within their import
+  batch; a delta pass re-imports anyone whose password, email or MFA changed after the export, so an old leaked
+  password does not keep working; `email_verified` copied, never upgraded; sign-up off during import; conflicts reviewed by hand, never merged by email; TerraScale
   refuses a social identity whose email already has an account ([end-user auth][eua]); the hosted reset and
   email-code flows prove the mailbox.
 - **Duplicate users**: the export lowercases and trims emails and the duplicate query runs first; TerraScale
@@ -308,7 +330,7 @@ switch; after it, rollback needs a reverse data move.
   imported (phone-only, anonymous, deleted); the owner decides delete, keep unowned or contact.
 - **Email verification state**: copied from `email_confirmed_at`; unverified users must pass an email code.
 - **Cutover fails halfway**: Supabase stays authoritative until the app switch; the import is per row and
-  resumable; the rehearsal project proves the run first.
+  resumable; the delta pass must reach zero before the switch; the rehearsal project proves the run first.
 
 ## Product gaps
 
