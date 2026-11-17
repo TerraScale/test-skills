@@ -135,14 +135,21 @@ Then fix the identity plan:
   `firebase_uid -> app_user_id -> terrascale_user_id`. Rewrite data ownership to
   `app_user_id` once; your backend mints data tokens for it
   ([data access for your users](https://docs.terrascale.tech/guides/end-user-authentication#data-access-for-your-users)).
-- [ ] **Who is imported.** Import every user with an email. Users without an email
-  (phone-only, anonymous) cannot be imported; plan step 4's workaround for them.
-- [ ] **Duplicates.** For each email with several Firebase accounts, choose one
-  surviving account, map every duplicate uid to the same `app_user_id`, and plan
-  the data merge.
-- [ ] **Unverified emails.** Keep Firebase's `emailVerified` value. Never mark an
+  Every uid keeps its own `app_user_id`, even when accounts are merged.
+- [ ] **Who is imported.** Only accounts with an email and `emailVerified: true`.
+  Users without an email (phone-only, anonymous) cannot be imported; plan step 4's
+  workaround for them. Unverified accounts are skipped and keep using Firebase
+  during the bridge; the app asks them to verify there, and a later run imports
+  them. Importing them earlier would hand their data to whoever holds the mailbox,
+  who may not be the person who created the Firebase account. Never mark an
   unverified address as verified
   ([user profiles](https://github.com/TerraScale/terrascale/blob/main/docs/auth/user-profiles.md#import)).
+- [ ] **Duplicates.** Only verified accounts that share an email are merged: one
+  is imported and the others point at it with `merged_into`, and you move their
+  data in an explicit step. An unverified account that shares an email with
+  another is skipped as `unverified_duplicate` and never merged.
+- [ ] **Email changes.** Turn off email changes in the Firebase app from the first
+  export until the bridge closes: TerraScale's user update cannot change an email.
 - [ ] **Bridge window.** A period (for example 14 days) in which the backend
   accepts both Firebase ID tokens and TerraScale access tokens.
 
@@ -215,9 +222,10 @@ https://auth.terrascale.tech/ui/<project ID>/social/<provider>/callback
 ([social sign-in](https://docs.terrascale.tech/guides/end-user-authentication#what-end-users-see),
 [SocialCallbackEndpoint.cs](https://github.com/TerraScale/terrascale/blob/main/src/TerraScale.Authentication/Features/SignIn/SocialCallbackEndpoint.cs)):
 
-- Accounts are never linked by email. A provider identity whose email already
-  belongs to an account is refused with "Sign in with your password, then connect
-  ... from Security".
+- Accounts are never linked by email alone. A provider identity with a verified
+  email that already belongs to an account is refused with "Sign in with your
+  password, then connect ... from Security". One whose email the provider does not
+  mark verified gets an emailed code, and redeeming it connects the provider.
 - The import cannot create provider links: rows accept email, profile, metadata,
   `email_verified`, `external_id` and `password_hash` only.
 - So an imported Google-only user signs in **once with an email code**, then
@@ -236,18 +244,19 @@ https://auth.terrascale.tech/ui/<project ID>/social/<provider>/callback
 
 ## 5. Import and map
 
-Follow [user export](references/user-export.md#import-into-terrascale):
+Follow [user export](references/user-export.md#4-import-into-terrascale):
 
-1. Transform `users.json` into import rows: `email`, `email_verified`,
-   `external_id` (the Firebase uid), `first_name`/`last_name`/`image_url` if you
-   want them, and `private_metadata` such as `{"firebase_mfa": true}`. No
-   `password_hash`.
+1. Transform `users.json` into import rows: `email`, `email_verified: true`,
+   `external_id` (the Firebase uid), `first_name`/`image_url` if you want them,
+   and `private_metadata` such as `{"firebase_mfa": true}`. No `password_hash`.
+   Each run reads the previous ledger, keeps every `app_user_id`, writes to a new
+   folder, emits only uids not imported yet, and lists changed emails.
 2. Post batches of up to 500 rows to `POST /v1/{project}/users/import`
    (ten calls per project per minute). Rows commit independently; save every
    response.
-3. Write `items[].user.id` into the mapping table by row index. Rows in
-   `errors[]` with `user_conflict` are duplicates of an email or `external_id`
-   already in the project; resolve them by email before resubmitting.
+3. Record `items[].user.id` in the ledger by `external_id`. Rows in `errors[]`
+   stay pending; `user_conflict` means the email or `external_id` already exists
+   and is reconciled by email before the next run.
 4. Set custom claims with `PATCH /v1/{project}/users/{user}` and
    `custom_claims` (import does not take them).
 5. Reconcile: export the TerraScale directory and compare counts and
@@ -295,12 +304,18 @@ export async function verifyAccessToken(token) {
 
 The Python equivalent with PyJWT is in the
 [end-user authentication guide](https://docs.terrascale.tech/guides/end-user-authentication#sign-users-in).
-Then look up `payload.sub` in the mapping table to get `app_user_id`. Treat an
-unknown `sub` as a new user only after the bridge closes.
+Then look up `payload.sub` in the mapping table to get the user's
+`app_user_id` (`merged_into` when set). Before step 4 of the cutover, an unknown
+`sub` is an error: refuse it and investigate. From step 4 on, an unknown `sub` is a
+new TerraScale sign-up: create a new `app_user_id` and a mapping row with
+`firebase_uid: null`. If that person turns out to own a Firebase account (a later
+run imports a verified account with the same email), attach it as
+[user export](references/user-export.md#4-import-into-terrascale) describes.
 
-Gate features that need a proven mailbox on `email_verified`: an imported
-unverified user becomes verified after redeeming an emailed code
-([Passcodes.cs](https://github.com/TerraScale/terrascale/blob/main/src/TerraScale.Authentication/Features/Identity/Passcodes.cs)).
+Tokens carry `email_verified`. Imported users are verified, and redeeming an
+emailed code sets it
+([Passcodes.cs](https://github.com/TerraScale/terrascale/blob/main/src/TerraScale.Authentication/Features/Identity/Passcodes.cs));
+still check it before features that need a proven mailbox.
 
 Cross-origin `fetch` to `auth.terrascale.tech` is not supported; use browser
 navigation and a backend exchange
@@ -332,15 +347,15 @@ ownership there. Moving Firestore data is firestore-to-terrascale's job.
 
 ## 8. Verify before cutover
 
-- [ ] Counts: Firebase users with email = imported + documented skips; zero
-  unexplained `errors[]`.
-- [ ] Every mapping row has `firebase_uid`, `app_user_id` and
-  `terrascale_user_id`; no `terrascale_user_id` appears twice.
-- [ ] `email_verified` in the TerraScale export equals Firebase's value for a
-  sample of verified and unverified users.
+- [ ] Every Firebase uid is in the ledger as `imported`, `merged` or `skipped`
+  with a reason; zero unexplained `errors[]`; `changed.json` handled.
+- [ ] No `terrascale_user_id` belongs to two `imported` rows, and no unverified
+  uid is `merged` or `imported`.
+- [ ] `email_verified` is `true` for every imported user in the TerraScale export.
 - [ ] A test user of each kind signs in on staging: password user (email code,
-  then reset), Google user (email code, then connect), Apple and GitHub users,
-  an unverified user, a disabled user (refused).
+  then reset), Google user (email code, then connect), Apple and GitHub users, a
+  disabled user (refused). A skipped unverified user still reaches only their own
+  data through Firebase.
 - [ ] An expired, wrong-audience and other-project token are each refused by the
   backend; a valid one maps to the right `app_user_id`.
 - [ ] Data rules: user A cannot read user B's rows; an admin role can.
@@ -350,13 +365,16 @@ ownership there. Moving Firestore data is firestore-to-terrascale's job.
 
 1. **Freeze Firebase sign-up**: deploy a `beforeUserCreated` blocking function
    that rejects new accounts, or turn off sign-up in Identity Platform.
-2. **Delta import**: export again and import users created since the first export.
+2. **Delta import**: export again and run the transform with the previous
+   ledger into a new folder; handle `changed.json`; import and record.
 3. **Ship the bridge build**: the backend accepts both Firebase ID tokens
    (`verifyIdToken(token, true)`) and TerraScale access tokens and maps both to
    `app_user_id`. New sign-ins go to TerraScale. Users already signed in to
    Firebase keep working and see a banner to switch.
 4. **Turn on TerraScale self sign-up** if the app allows it, only after the delta
-   import is reconciled.
+   import is reconciled. From now on, unknown `sub`s get new mapping rows (step 6).
+   Run the transform again during the bridge to import users who verified their
+   email on Firebase.
 5. **Close the bridge**: call `revokeRefreshTokens` for every Firebase user, stop
    accepting Firebase tokens in the backend (ID tokens last one hour;
    `checkRevoked` ends them at once,
@@ -377,19 +395,27 @@ until a set date after the bridge closes.
 - Before step 5: switch the frontend flag back to Firebase sign-in; the backend
   still accepts Firebase tokens. Remove the Firebase sign-up freeze.
 - After step 5: re-enable Firebase sign-in and stop revoking; users sign in again.
-- Users who signed up on TerraScale during the bridge have no Firebase account:
-  create them with the Admin SDK and ask them to reset their password, because the
-  TerraScale export holds no credentials.
+- Users who signed up on TerraScale during the bridge have mapping rows with
+  `firebase_uid: null`. Create each in Firebase with the Admin SDK `createUser`
+  (or `importUsers`), choosing the uid, with `emailVerified: true` (they proved
+  the mailbox at sign-up). Write that uid into their mapping row so the bridge
+  maps it to their existing `app_user_id`, then ask them to reset their password,
+  because the TerraScale export holds no credentials
+  ([manage users](https://firebase.google.com/docs/auth/admin/manage-users)).
 - Data stays valid in either direction because it is keyed by `app_user_id`.
 - Disable, rather than delete, TerraScale users created by the import if you
   abandon the migration, until you are sure.
 
 ## Account takeover and other risks
 
-- **Unverified emails** keep `email_verified: false`. An attacker who registered
-  someone else's address in Firebase gets no TerraScale credential: no password is
-  imported and every sign-in path needs the mailbox. Do not attach that account's
-  Firebase data to the TerraScale user until `email_verified` is true.
+- **Unverified emails**: unverified Firebase accounts are not imported and never
+  merged. An attacker who registered someone else's address in Firebase keeps
+  only their own `app_user_id` on Firebase and gets no TerraScale account. The real
+  owner who later signs up on TerraScale gets a fresh `app_user_id`, not the
+  attacker's data.
+- **Email changes**: blocked in the Firebase app from the first export until the
+  bridge closes; any change found in `changed.json` is fixed by deleting and
+  re-importing before cutover, so no TerraScale account stays on an old mailbox.
 - **Collisions**: self sign-up stays off until import and reconciliation finish.
 - **Social linking**: never by email, so a provider account cannot take over an
   imported account; users connect providers after a fresh sign-in.
@@ -399,5 +425,5 @@ until a set date after the bridge closes.
   security page right after their first sign-in, and keep your own extra checks
   on sensitive actions for flagged users during the bridge.
 - **Disabled users**: import them, then disable them before cutover.
-- **Orphans**: every Firebase uid ends in the mapping table as imported, merged
-  into a duplicate, or skipped with a reason.
+- **Orphans**: every Firebase uid ends in the ledger as imported, merged or
+  skipped with a reason, and every TerraScale sign-up gets a mapping row.

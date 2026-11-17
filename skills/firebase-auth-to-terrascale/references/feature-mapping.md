@@ -23,12 +23,19 @@ linked in each row.
 | SAML `saml.*` ([docs](https://firebase.google.com/docs/auth/web/saml)) | Not available for project end users. | Connect the IdP's OIDC interface as the generic OIDC provider, or keep those users on email codes. |
 | Custom token sign-in (`signInWithCustomToken`) | No sign-in equivalent on the project issuer. | For data access only, mint scoped end-user tokens on your backend. |
 
-Social sign-in requires a provider-verified email. Sign-in matches a linked
-identity by provider, issuer, client ID and subject; accounts are never linked by
-email. A new identity whose email is new creates an account only when sign-up is
-allowed; one whose email already exists is refused until the user signs in another
-way and connects the provider from the security page
-([social sign-in](https://docs.terrascale.tech/guides/end-user-authentication#what-end-users-see)).
+Sign-in matches a linked identity by provider, issuer, client ID and subject;
+accounts are never linked by email alone
+([social sign-in](https://docs.terrascale.tech/guides/end-user-authentication#what-end-users-see),
+[SocialCallbackEndpoint.cs](https://github.com/TerraScale/terrascale/blob/main/src/TerraScale.Authentication/Features/SignIn/SocialCallbackEndpoint.cs)):
+
+- A new identity whose provider asserts a verified email creates an account when
+  the email is new and sign-up is allowed. When the email already belongs to an
+  account, sign-in is refused until the user signs in another way and connects
+  the provider from the security page.
+- A new identity whose email the provider does not mark verified gets an emailed
+  code. Redeeming it connects the provider to the existing account with that
+  email, or creates one when sign-up is allowed
+  ([project social sign-in](https://github.com/TerraScale/terrascale/blob/main/docs/auth/project-social-sign-in.md)).
 
 ## Second factors
 
@@ -47,7 +54,7 @@ second-factor step follows; the provider's own MFA does not count.
 | --- | --- | --- |
 | `localId` (uid) | `external_id` | At most 255 characters, unique per project. TerraScale assigns its own ULID `id`. |
 | `email` | `email` | Required; unique per project. |
-| `emailVerified` | `email_verified` | Default `false`; keep Firebase's value. |
+| `emailVerified` | `email_verified` | Only verified accounts are imported, with `true`; unverified ones are skipped. |
 | `displayName` | `first_name`, `last_name` | 255 characters each; split carefully or keep the whole name in `first_name`. |
 | `photoUrl` | `image_url` | Absolute HTTPS URL, at most 2048 characters. |
 | `passwordHash`, `salt` | none | Firebase scrypt is not an accepted encoding. |

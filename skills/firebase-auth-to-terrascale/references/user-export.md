@@ -82,28 +82,64 @@ console.log(`users: ${Object.keys(extras).length}`);
 For multi-tenant projects, export each tenant with this script (setting
 `FIREBASE_TENANT_ID`) and keep each tenant's files apart.
 
-## 2. Freeze and re-export
+## 2. Freeze, re-export and repeat
 
-The first export is for rehearsal. On cutover day, block new Firebase accounts
-with a `beforeUserCreated` blocking function
+The first export is a rehearsal. On cutover day, block new Firebase accounts with
+a `beforeUserCreated` blocking function
 ([blocking functions](https://firebase.google.com/docs/auth/extend-with-blocking-functions)),
-export again, and import only uids not imported before.
+export again, and run the transform with the previous `mapping.json`. Every run
+writes to a **new output folder** (`run-1`, `run-2`, ...), keeps every
+`app_user_id` it assigned before, and emits rows only for uids that are not
+imported yet. Run it again during the bridge whenever users verify their email
+on Firebase.
+
+From the first export until the bridge closes, turn off email changes in the
+Firebase app. `PATCH /v1/{project}/users/{user}` cannot change an email
+([user profiles](https://github.com/TerraScale/terrascale/blob/main/docs/auth/user-profiles.md)),
+so a Firebase email change after import would leave the TerraScale account on the
+old mailbox, and whoever holds that mailbox could sign in with an email code.
 
 ## 3. Transform
 
-The transform writes three files: import batches without hashes, the mapping
-skeleton with one new `app_user_id` (a ULID) per Firebase uid, and a skip list
-with a reason for every user that is not imported. Save it as
-`transform.mjs` outside the repository and run
-`node transform.mjs users.json extras.json out`.
+The mapping file is the migration ledger: one row per Firebase uid with
+`app_user_id` (a ULID that never changes), `status` and `reason`. The rules:
+
+- **Each uid gets its own `app_user_id`.** Rewrite data ownership to it once.
+- **Only accounts with `emailVerified: true` are imported.** An unverified account
+  is skipped as `unverified` or, when another account shares its email,
+  `unverified_duplicate`. It keeps its `app_user_id` and keeps working on Firebase
+  during the bridge. If its holder verifies the address there, the next run
+  imports it. Importing it earlier would let whoever holds the mailbox (who may
+  not be the person who created the Firebase account) inherit its data.
+- **Merges happen only between verified accounts.** Verified accounts that share
+  an email become one TerraScale user. The most recent sign-in is imported, and
+  the others get `status: "merged"` and `merged_into` (the survivor's
+  `app_user_id`). Their data moves to `merged_into` in an explicit data step;
+  identities are never merged silently.
+- **Users without an email** are skipped as `phone_only` or `no_email`.
+- **Changes since the last run** go to `changed.json`: `email` (the address
+  changed), `email_verified` (verification changed) or `deleted` (gone from
+  Firebase).
+
+Save the script as `transform.mjs` outside the repository. The first run passes
+`-` as the previous mapping:
+
+~~~sh
+node transform.mjs users.json extras.json - run-1
+node transform.mjs users-2.json extras-2.json run-1/mapping.json run-2
+~~~
 
 ~~~js
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
-const [exportFile, extrasFile, outDir] = process.argv.slice(2);
+const [exportFile, extrasFile, previousFile, outDir] = process.argv.slice(2);
+if (!outDir || existsSync(outDir)) {
+  throw new Error("usage: transform.mjs users.json extras.json <previous mapping.json | -> <new output folder>");
+}
 const users = JSON.parse(readFileSync(exportFile, "utf8")).users;
 const extras = JSON.parse(readFileSync(extrasFile, "utf8"));
+const previous = previousFile === "-" ? [] : JSON.parse(readFileSync(previousFile, "utf8"));
 mkdirSync(outDir, { recursive: true });
 
 const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -116,85 +152,107 @@ function ulid() {
   }
   const bytes = randomBytes(16);
   let tail = "";
-  for (let i = 0; i < 16; i++) tail += alphabet[bytes[i] % 32];
+  for (let i = 0; i < 16; i++) tail += alphabet[bytes[i] & 31];
   return head + tail;
 }
 
-function httpsUrl(value) {
-  return typeof value === "string" && value.startsWith("https://") && value.length <= 2048 ? value : undefined;
+const key = (email) => email.trim().toLowerCase();
+const httpsUrl = (value) =>
+  typeof value === "string" && value.startsWith("https://") && value.length <= 2048 ? value : undefined;
+const done = (row) => row?.status === "imported" || row?.status === "merged";
+
+const mapping = new Map(previous.map((row) => [row.firebase_uid, row]));
+const byUid = new Map(users.map((user) => [user.localId, user]));
+
+const changed = [];
+for (const row of mapping.values()) {
+  if (!done(row)) continue;
+  const user = byUid.get(row.firebase_uid);
+  if (!user) changed.push({ firebase_uid: row.firebase_uid, change: "deleted" });
+  else if (!user.email || key(user.email) !== row.email_key) changed.push({ firebase_uid: row.firebase_uid, change: "email" });
+  else if ((user.emailVerified === true) !== row.email_verified) changed.push({ firebase_uid: row.firebase_uid, change: "email_verified" });
 }
 
-const byEmail = new Map();
+const owners = new Map([...mapping.values()].filter((row) => row.status === "imported").map((row) => [row.email_key, row]));
+const emailCount = new Map();
+for (const user of users) if (user.email) emailCount.set(key(user.email), (emailCount.get(key(user.email)) ?? 0) + 1);
+
+const pending = new Map();
 for (const user of users) {
-  if (!user.email) continue;
-  const key = user.email.trim().toLowerCase();
-  byEmail.set(key, [...(byEmail.get(key) ?? []), user]);
-}
-
-function survivor(group) {
-  return [...group].sort((a, b) =>
-    Number(b.emailVerified === true) - Number(a.emailVerified === true)
-    || Number(b.lastSignedInAt ?? 0) - Number(a.lastSignedInAt ?? 0))[0];
+  const before = mapping.get(user.localId);
+  if (done(before)) continue;
+  const row = {
+    firebase_uid: user.localId,
+    app_user_id: before?.app_user_id ?? ulid(),
+    email_key: user.email ? key(user.email) : null,
+    email_verified: user.emailVerified === true,
+    status: "skipped",
+    reason: null,
+    merged_into: null,
+    terrascale_user_id: null,
+  };
+  mapping.set(user.localId, row);
+  if (!user.email) row.reason = user.phoneNumber ? "phone_only" : "no_email";
+  else if (!row.email_verified) row.reason = emailCount.get(row.email_key) > 1 ? "unverified_duplicate" : "unverified";
+  else pending.set(row.email_key, [...(pending.get(row.email_key) ?? []), user]);
 }
 
 const rows = [];
-const mapping = [];
-const skipped = [];
-const appIds = new Map();
-
-for (const [email, group] of byEmail) {
-  const keep = survivor(group);
-  const appUserId = ulid();
+for (const [email, group] of pending) {
+  group.sort((a, b) => Number(b.lastSignedInAt ?? 0) - Number(a.lastSignedInAt ?? 0));
+  const owner = owners.get(email);
+  const survivor = owner ? null : group[0];
   for (const user of group) {
-    appIds.set(user.localId, appUserId);
-    mapping.push({ firebase_uid: user.localId, app_user_id: appUserId, email_key: email, survivor_uid: keep.localId });
+    const row = mapping.get(user.localId);
+    if (user !== survivor) {
+      row.status = "merged";
+      row.merged_into = (owner ?? mapping.get(survivor.localId)).app_user_id;
+      row.terrascale_user_id = owner?.terrascale_user_id ?? null;
+      continue;
+    }
+    const extra = extras[user.localId] ?? {};
+    row.status = "pending_import";
+    rows.push({
+      email: user.email.trim(),
+      email_verified: true,
+      external_id: user.localId,
+      first_name: user.displayName ? user.displayName.slice(0, 255) : undefined,
+      image_url: httpsUrl(user.photoUrl),
+      private_metadata: {
+        firebase_providers: (user.providerUserInfo ?? []).map((info) => info.providerId),
+        firebase_mfa: (extra.mfa ?? []).length > 0,
+        firebase_disabled: extra.disabled === true,
+      },
+    });
   }
-  const extra = extras[keep.localId] ?? {};
-  rows.push({
-    email: keep.email.trim(),
-    email_verified: keep.emailVerified === true,
-    external_id: keep.localId,
-    first_name: keep.displayName ? keep.displayName.slice(0, 255) : undefined,
-    image_url: httpsUrl(keep.photoUrl),
-    private_metadata: {
-      firebase_providers: (keep.providerUserInfo ?? []).map((info) => info.providerId),
-      firebase_mfa: (extra.mfa ?? []).length > 0,
-      firebase_disabled: extra.disabled === true,
-      firebase_merged_uids: group.filter((user) => user !== keep).map((user) => user.localId),
-    },
-  });
-}
-
-for (const user of users) {
-  if (user.email) continue;
-  const appUserId = ulid();
-  appIds.set(user.localId, appUserId);
-  mapping.push({ firebase_uid: user.localId, app_user_id: appUserId, email_key: null, survivor_uid: null });
-  skipped.push({ firebase_uid: user.localId, reason: user.phoneNumber ? "phone_only" : "no_email" });
 }
 
 for (let i = 0; i < rows.length; i += 500) {
   writeFileSync(`${outDir}/batch-${String(i / 500).padStart(4, "0")}.json`, JSON.stringify({ users: rows.slice(i, i + 500) }));
 }
-writeFileSync(`${outDir}/mapping.json`, JSON.stringify(mapping));
-writeFileSync(`${outDir}/skipped.json`, JSON.stringify(skipped));
-console.log(`rows: ${rows.length} mapped: ${mapping.length} skipped: ${skipped.length} merged: ${mapping.length - rows.length - skipped.length}`);
+const ledger = [...mapping.values()];
+writeFileSync(`${outDir}/mapping.json`, JSON.stringify(ledger));
+writeFileSync(`${outDir}/changed.json`, JSON.stringify(changed));
+const count = (field, value) => ledger.filter((row) => row[field] === value).length;
+console.log(`rows: ${rows.length} merged: ${count("status", "merged")} skipped: ${count("status", "skipped")} unverified: ${count("reason", "unverified") + count("reason", "unverified_duplicate")} changed: ${changed.length}`);
 ~~~
 
 Review before importing:
 
-- **Duplicates.** The survivor is the verified account, then the most recent
-  sign-in. Every merged uid points at the survivor's `app_user_id`. Check the
-  merges by hand when a group mixes verified and unverified accounts: an
-  unverified duplicate may belong to someone else, so do not merge its data until
-  the surviving user has proven the mailbox.
-- **Email case.** The grouping key lowercases emails so case variants merge;
-  TerraScale refuses a duplicate email with `user_conflict`.
+- **`changed.json` must be handled first.** `deleted`: disable the TerraScale
+  user. `email`: before cutover, delete the TerraScale user in the dashboard, set
+  that uid's row back to `"status": "pending_import"` with
+  `"terrascale_user_id": null`, and run the transform again into a new folder; the
+  row is imported with the new address and the same `external_id`. After cutover,
+  the user changes the address themselves on TerraScale. `email_verified`: if it
+  became false, disable the TerraScale user until you know why.
+- **Merges.** Only verified accounts are merged. List each `merged` row and move
+  its data to `merged_into` in the data migration.
 - **Names.** `displayName` goes to `first_name` whole; split it only if your app
   already stores given and family names.
 - **Custom claims** stay out of the batches; they are set after import.
-- **No hashes.** The rows contain no `password_hash`. Search the output folder for
-  `passwordHash` and `salt` before you continue; both must be absent.
+- **No hashes.** Search the output folder for `passwordHash` and `salt`; both must
+  be absent.
 
 ## 4. Import into TerraScale
 
@@ -203,11 +261,12 @@ independently, sends no email, and allows ten calls per project per minute. It
 needs a project admin's sign-in token or a project secret API key with
 `auth:write`
 ([user profiles and imports](https://github.com/TerraScale/terrascale/blob/main/docs/auth/user-profiles.md#import)).
-Keep the token in `TERRASCALE_ACCESS_TOKEN`, read from a secret manager.
+Keep the token in `TERRASCALE_ACCESS_TOKEN`, read from a secret manager. Set
+`RUN` to this run's folder:
 
 ~~~sh
 api() { curl -sS --fail-with-body -H @<(printf 'Authorization: Bearer %s\n' "$TERRASCALE_ACCESS_TOKEN") "$@"; }
-for batch in out/batch-*.json; do
+for batch in "$RUN"/batch-*.json; do
   result="${batch%.json}.result.json"
   [ -s "$result" ] && continue
   api -X POST "https://auth.terrascale.tech/v1/$TERRASCALE_PROJECT_ID/users/import" \
@@ -217,19 +276,54 @@ for batch in out/batch-*.json; do
 done
 ~~~
 
-The response is `{"items":[{"index":0,"user":{...}}],"errors":[{"index":1,"code":"...","message":"..."}]}`
-with zero-based row indexes. For each batch:
+Because each run has its own folder, the skip only resumes an interrupted run;
+it never skips a new batch. The response is
+`{"items":[{"index":0,"user":{...}}],"errors":[{"index":1,"code":"...","message":"..."}]}`.
+Record the results into the run's ledger with `record.mjs`:
 
-- Write `items[].user.id` as `terrascale_user_id` into the mapping rows whose
-  `firebase_uid` equals `items[].user.external_id`, including merged uids.
-- `invalid_request` errors: fix the row (for example a non-HTTPS photo URL or a
-  control character in a name) and import it in a new batch.
-- `user_conflict` errors: the email or `external_id` already exists. Read the
-  existing user before resubmitting. A lost response can leave committed rows, so
-  a retried batch reports them as conflicts; reconcile them by email instead of
-  creating anything new.
-- A `429` means the per-minute limit; wait and resume. The loop skips batches that
-  already have a result file.
+~~~js
+import { readFileSync, writeFileSync } from "node:fs";
+
+const [mappingFile, ...files] = process.argv.slice(2);
+const mapping = JSON.parse(readFileSync(mappingFile, "utf8"));
+const byUid = new Map(mapping.map((row) => [row.firebase_uid, row]));
+const byEmail = new Map(mapping.filter((row) => row.status === "pending_import").map((row) => [row.email_key, row]));
+
+for (const file of files) {
+  for (const item of JSON.parse(readFileSync(file, "utf8")).items ?? []) {
+    const user = item.user ?? item;
+    const row = (user.external_id && byUid.get(user.external_id)) || byEmail.get(user.email?.trim().toLowerCase());
+    if (row?.status !== "pending_import") continue;
+    row.status = "imported";
+    row.terrascale_user_id = user.id;
+  }
+}
+
+const imported = new Map(mapping.filter((row) => row.status === "imported").map((row) => [row.app_user_id, row.terrascale_user_id]));
+for (const row of mapping) {
+  if (row.status === "merged" && !row.terrascale_user_id) row.terrascale_user_id = imported.get(row.merged_into) ?? null;
+}
+writeFileSync(mappingFile, JSON.stringify(mapping));
+const count = (status) => mapping.filter((row) => row.status === status).length;
+console.log(`imported: ${count("imported")} merged: ${count("merged")} pending: ${count("pending_import")} skipped: ${count("skipped")}`);
+~~~
+
+~~~sh
+node record.mjs "$RUN/mapping.json" "$RUN"/batch-*.result.json
+~~~
+
+Errors stay `pending_import`, and the next run emits them again:
+
+- `invalid_request`: fix the cause (for example a control character in a name)
+  and run the transform again.
+- `user_conflict`: the email or `external_id` already exists. A lost response
+  can leave committed rows, so export the TerraScale directory (step 6) and pass
+  the export pages to `record.mjs`; it attaches by email. If the email belongs to
+  someone who signed up on TerraScale during the bridge, attaching is safe because
+  both sides proved the mailbox: `PATCH` the user's `external_id` to the Firebase
+  uid and move the data of their sign-up `app_user_id` into the Firebase
+  `app_user_id`.
+- A `429` means the per-minute limit; wait and rerun the loop.
 
 ## 5. Claims and disabled users
 
@@ -259,15 +353,14 @@ api -G "https://auth.terrascale.tech/v1/$TERRASCALE_PROJECT_ID/users/export" --d
 Repeat with `after` set to the previous `next` until the response has no
 `X-Export-Next` header, saving each page and deduplicating by `id`. Then check:
 
-- Every import row has exactly one TerraScale user with the same `email`, and the
-  mapping row of its uid has that user's `id`.
-- `email_verified` matches Firebase for every imported user. Repository source
-  shows the export returns the stored value, which is `false` for imported
-  unverified users, although the public page still says it is always `true`.
+- Every `imported` row's `terrascale_user_id` is in the export with the same email,
+  and no `terrascale_user_id` belongs to two `imported` rows.
+- Every `merged` row points at an `imported` row's `app_user_id`.
+- `email_verified` is `true` for every imported user (only verified accounts are
+  imported).
 - `disabled` is true exactly for the users disabled in Firebase.
-- No TerraScale user lacks an `external_id` unless it signed up after cutover.
-- Every Firebase uid is in `mapping.json`, and every uid without a
-  `terrascale_user_id` is in `skipped.json` with a reason.
+- Every Firebase uid is in the ledger as `imported`, `merged` or `skipped` with a
+  reason, and `changed.json` is empty or handled.
 
 The export is a creation-cutoff scan, not a snapshot: pause sign-up and imports
 while you reconcile.
