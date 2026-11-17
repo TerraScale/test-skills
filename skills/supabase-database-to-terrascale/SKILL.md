@@ -132,16 +132,16 @@ pg_dump --schema-only --schema=public --no-owner --no-privileges --file=source-s
 pg_dump --data-only --schema=public --inserts --column-inserts --no-owner --no-privileges --file=source-data.sql
 ```
 
-If an existing secret manager supplies a connection string, libpq also accepts it
-through `PGDATABASE`; do not put a password-bearing URI in `--dbname` arguments:
-
-```sh
-PGDATABASE="$SUPABASE_DATABASE_URL" pg_dump --schema-only --schema=public --no-owner --no-privileges --file=source-schema.sql
-PGDATABASE="$SUPABASE_DATABASE_URL" pg_dump --data-only --schema=public --inserts --column-inserts --no-owner --no-privileges --file=source-data.sql
-```
+Use `PGSERVICE` with `PGSERVICEFILE` for the intended source connection and
+`PGPASSFILE` for its password. `PGDATABASE` supplies a database name; assigning a
+connection URI to it does not expand that URI into host, user and password
+settings. Keep password-bearing URIs out of command arguments. If only a URI is
+available, provision the service and password files securely before exporting.
 
 Sources: [pg_dump options](https://www.postgresql.org/docs/current/app-pgdump.html),
-[libpq environment](https://www.postgresql.org/docs/current/libpq-envars.html).
+[libpq environment](https://www.postgresql.org/docs/current/libpq-envars.html),
+[connection service files](https://www.postgresql.org/docs/current/libpq-pgservice.html)
+and [connection parameter expansion](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PQCONNECTDBPARAMS).
 Each dump has its own snapshot. For final reconciliation, fence **all** source
 writers before exporting and counting. Rehearsal exports taken while writes
 continue cannot establish a shared final cutoff.
