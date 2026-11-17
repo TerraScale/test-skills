@@ -37,9 +37,11 @@ Source: [Prisma client generation](https://www.prisma.io/docs/orm/prisma-client/
 
 ## 2. Connect
 
-Export TERRASCALE_ACCESS_TOKEN using the
-[API-key exchange](https://docs.terrascale.tech/getting-started/#exchange-the-key-for-an-access-token).
-Refresh the short-lived token before later calls.
+Export TERRASCALE_PROJECT_ID, TERRASCALE_DATABASE_NAME and TERRASCALE_API_KEY.
+Pass the API key to the required source SDK: it exchanges and refreshes short-lived
+access tokens automatically for the existing ORM client. Keep the key on the
+application server.
+Source: [JavaScript authentication](https://docs.terrascale.tech/getting-started/javascript).
 
 ~~~js
 import { PrismaClient } from "@prisma/client";
@@ -49,7 +51,7 @@ import { PrismaTerraScale } from "@terrascale/sdk/prisma";
 const db = createTerraBaseClient({
   baseUrl: "https://api.terrascale.tech",
   project: process.env.TERRASCALE_PROJECT_ID,
-  token: process.env.TERRASCALE_ACCESS_TOKEN,
+  apiKey: process.env.TERRASCALE_API_KEY,
 }).database(process.env.TERRASCALE_DATABASE_NAME);
 const prisma = new PrismaClient({ adapter: new PrismaTerraScale(db) });
 ~~~

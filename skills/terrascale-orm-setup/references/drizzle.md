@@ -14,9 +14,11 @@ npm install /path/to/terrascale-sdk-<version>.tgz
 ~~~
 
 The adapter accepts an SDK database handle, not a Postgres connection string.
-Export TERRASCALE_PROJECT_ID and TERRASCALE_ACCESS_TOKEN; obtain the token with
-the [documented API-key exchange](https://docs.terrascale.tech/getting-started/#exchange-the-key-for-an-access-token).
-Refresh the short-lived token before it expires.
+Export TERRASCALE_PROJECT_ID, TERRASCALE_DATABASE_NAME and TERRASCALE_API_KEY.
+Pass the API key to the required source SDK: it exchanges and refreshes short-lived
+access tokens automatically for the existing ORM client. Keep the key on the
+application server.
+Source: [JavaScript authentication](https://docs.terrascale.tech/getting-started/javascript).
 
 ~~~js
 import { drizzle } from "drizzle-orm/sqlite-proxy";
@@ -27,7 +29,7 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 const { query, batch } = drizzleProxy(createTerraBaseClient({
   baseUrl: "https://api.terrascale.tech",
   project: process.env.TERRASCALE_PROJECT_ID,
-  token: process.env.TERRASCALE_ACCESS_TOKEN,
+  apiKey: process.env.TERRASCALE_API_KEY,
 }).database(process.env.TERRASCALE_DATABASE_NAME));
 const orm = drizzle(query, batch);
 const users = sqliteTable("users", {
