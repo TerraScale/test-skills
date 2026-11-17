@@ -4,22 +4,21 @@ Agent skills for migrating to TerraScale and using it in your applications. Each
 skill is an independent set of instructions installed with Vercel’s
 [skills CLI](https://github.com/vercel-labs/skills).
 
-The catalog below is planned; this scaffold does not publish any skills yet.
-Install a skill once its status changes to available.
+All 17 skills below are ready to install, individually or by family.
 
 ## Install
 
 Requires Node.js and npm. Run from the project where your agent works:
 
 ```sh
-npx skills add TerraScale/test-skills
-npx skills add TerraScale/test-skills --skill supabase-to-terrascale
-npx skills add TerraScale/test-skills --list
+npx -y skills add TerraScale/test-skills
+npx -y skills add TerraScale/test-skills --skill supabase-to-terrascale
+npx -y skills add TerraScale/test-skills --list
 ```
 
-The first command opens skill selection. `--skill` selects one skill; `--list`
-shows available skills without installing. An empty catalog reports “No skills
-found” until the first skill lands. `npx skills list` lists skills already installed.
+The first command opens skill selection. `--skill` selects one or more named
+skills; `--list` shows available skills without installing.
+`npx -y skills list` lists skills already installed.
 
 Add `--agent codex` or `--agent claude-code` to choose an agent, and `--global`
 to install for your user instead of the current project. The CLI supports Codex,
@@ -30,44 +29,69 @@ for all installation options.
 
 ## Skills
 
-Each skill PR updates only its own row from planned to available.
+Ready means the skill instructions are available. Check each skill's prerequisites
+and release gates before use.
 
 ### Supabase
 
+Install just this family:
+
+```sh
+npx -y skills add TerraScale/test-skills --skill supabase-to-terrascale supabase-database-to-terrascale supabase-auth-to-terrascale supabase-storage-to-terrascale supabase-edge-functions-to-terrascale supabase-client-to-terrascale
+```
+
 | Skill | Purpose | Status |
 | --- | --- | --- |
-| supabase-to-terrascale | Entry point: inventory, plan, cutover, and rollback. | planned |
-| supabase-database-to-terrascale | Migrate a Supabase database. | planned |
-| supabase-auth-to-terrascale | Migrate Supabase authentication. | planned |
-| supabase-storage-to-terrascale | Migrate Supabase storage. | planned |
-| supabase-edge-functions-to-terrascale | Move Supabase Edge Functions. | planned |
-| supabase-client-to-terrascale | Replace Supabase client integrations. | planned |
+| [supabase-to-terrascale](skills/supabase-to-terrascale/SKILL.md) | Inventory a Supabase project's services and clients, then plan, rehearse and cut over to TerraScale. | ready |
+| [supabase-database-to-terrascale](skills/supabase-database-to-terrascale/SKILL.md) | Migrate Supabase schemas and data with SQL conversion, authorization replacement, reconciliation and repeatable migrations. | ready |
+| [supabase-auth-to-terrascale](skills/supabase-auth-to-terrascale/SKILL.md) | Migrate Supabase users, password hashes, social providers and sessions with user ID mapping, verification and rollback. | ready |
+| [supabase-storage-to-terrascale](skills/supabase-storage-to-terrascale/SKILL.md) | Migrate Supabase Storage buckets, objects, policies and file URLs to TerraScale. | ready |
+| [supabase-edge-functions-to-terrascale](skills/supabase-edge-functions-to-terrascale/SKILL.md) | Migrate Supabase Edge Functions to TerraScale Functions, including Deno rewrites, callers, cron schedules and webhook gateways. | ready |
+| [supabase-client-to-terrascale](skills/supabase-client-to-terrascale/SKILL.md) | Rewrite Supabase client integrations to TerraScale SQL and documented ORMs. | ready |
 
 ### Firebase
 
+Install just this family:
+
+```sh
+npx -y skills add TerraScale/test-skills --skill firebase-to-terrascale firestore-to-terrascale firebase-auth-to-terrascale
+```
+
 | Skill | Purpose | Status |
 | --- | --- | --- |
-| firebase-to-terrascale | Entry point for moving off Firebase. | planned |
-| firestore-to-terrascale | Migrate Firestore data and access patterns. | planned |
-| firebase-auth-to-terrascale | Migrate Firebase authentication. | planned |
+| [firebase-to-terrascale](skills/firebase-to-terrascale/SKILL.md) | Inventory Firebase services, plan data and identity changes, replace storage and functions, and coordinate client cutover and rollback. | ready |
+| [firestore-to-terrascale](skills/firestore-to-terrascale/SKILL.md) | Migrate Firestore documents and Realtime Database JSON with typed exports, relational modeling, SQL imports and query and rule replacement. | ready |
+| [firebase-auth-to-terrascale](skills/firebase-auth-to-terrascale/SKILL.md) | Migrate Firebase Authentication or Identity Platform users, providers, custom claims, token checks and security rules. | ready |
 
 ### Other databases
 
+Install just this family:
+
+```sh
+npx -y skills add TerraScale/test-skills --skill postgres-to-terrascale turso-to-terrascale sqlite-d1-to-terrascale planetscale-to-terrascale
+```
+
 | Skill | Purpose | Status |
 | --- | --- | --- |
-| postgres-to-terrascale | Migrate Neon, RDS, Cloud SQL, or self-hosted Postgres. | planned |
-| turso-to-terrascale | Migrate from Turso. | planned |
-| sqlite-d1-to-terrascale | Migrate SQLite files or Cloudflare D1. | planned |
-| planetscale-to-terrascale | Migrate PlanetScale or other MySQL databases. | planned |
+| [postgres-to-terrascale](skills/postgres-to-terrascale/SKILL.md) | Migrate PostgreSQL from Neon, AWS RDS or Aurora, Google Cloud SQL, Azure or a self-hosted server to TerraScale. | ready |
+| [turso-to-terrascale](skills/turso-to-terrascale/SKILL.md) | Migrate Turso databases, per-tenant fleets and client code to TerraScale. | ready |
+| [sqlite-d1-to-terrascale](skills/sqlite-d1-to-terrascale/SKILL.md) | Migrate SQLite files and Cloudflare D1 databases, including Worker SQL calls and recovery planning. | ready |
+| [planetscale-to-terrascale](skills/planetscale-to-terrascale/SKILL.md) | Migrate PlanetScale Vitess, MySQL and MariaDB with consistent exports, schema and SQL translation, imports, driver changes and verified cutover. | ready |
 
 ### Using TerraScale
 
+Install just this family:
+
+```sh
+npx -y skills add TerraScale/test-skills --skill terrascale-getting-started terrascale-migrations-and-branches terrascale-orm-setup terrascale-sdks
+```
+
 | Skill | Purpose | Status |
 | --- | --- | --- |
-| terrascale-getting-started | Start a TerraScale project. | planned |
-| terrascale-migrations-and-branches | Work with migrations and branches. | planned |
-| terrascale-orm-setup | Configure an ORM for TerraScale. | planned |
-| terrascale-sdks | Use TerraScale SDKs. | planned |
+| [terrascale-getting-started](skills/terrascale-getting-started/SKILL.md) | Set up TerraScale from an empty project through a working SQL application. | ready |
+| [terrascale-migrations-and-branches](skills/terrascale-migrations-and-branches/SKILL.md) | Manage TerraScale schema migrations and database branches, including a database per pull request in CI. | ready |
+| [terrascale-orm-setup](skills/terrascale-orm-setup/SKILL.md) | Configure TerraScale ORM and typed SQL integrations with explicit schema ownership. | ready |
+| [terrascale-sdks](skills/terrascale-sdks/SKILL.md) | Write TerraScale SDK queries, batches and transactions in JavaScript, Python, Go, Rust or .NET. | ready |
 
 ## Contributing
 
