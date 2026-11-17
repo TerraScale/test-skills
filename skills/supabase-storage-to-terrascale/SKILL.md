@@ -90,7 +90,10 @@ Do not translate each Supabase predicate into a permissive grant independently.
 | Overwrite/upsert or metadata change | Files and metadata are immutable: upload a replacement and atomically change the application's file reference, then delete the old file after rollback expires. |
 
 - [ ] Resolve every Supabase owner to its target subject. Explicitly assign an
-  approved service owner for ownerless objects; never guess from a path.
+  approved service owner for ownerless objects; never guess from a path. Every
+  mapped owner must be a canonical ULID, including service owners, as required
+  by [end-user token minting](https://docs.terrascale.tech/guides/end-user-authentication#data-access-for-your-users).
+  The copier rejects invalid target owners before network requests or state writes.
 - [ ] Reject zero-byte objects and objects above 104857600 bytes (100 MiB);
   metadata must fit 16 KiB. Keep incompatible objects on the source or redesign
   the application representation and verify reconstruction before cutover.
@@ -103,7 +106,9 @@ Do not translate each Supabase predicate into a permissive grant independently.
   A Supabase JWT or ID token is not a replacement for that token.
 
 Filled plan example: source private `avatars`, owner-only read/write, `image/png`
-only, maximum 1 MiB; map source owner `old-user-17` to target subject `user-17`.
+only, maximum 1 MiB; map source owner `old-user-17` to target subject
+`01ARZ3NDEKTSV4RRFFQ69G5FAW`. Use this same mapped ULID in backend token minting
+and file metadata; a display name or Supabase UUID cannot substitute for it.
 The application gateway enforces the MIME/size rule and uploads on the user's
 behalf. Give direct end users owner-read only and no write grants in that design.
 
@@ -193,7 +198,7 @@ all references, or keep that object on the source.
     "bucketId": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "size": 6,
     "contentType": "image/png",
-    "userId": "user-17"
+    "userId": "01ARZ3NDEKTSV4RRFFQ69G5FAW"
   }
 ]
 ```
@@ -246,23 +251,33 @@ five minutes to complete uploads and 60 seconds for download capabilities.
 ## 5. Cut over with a write freeze
 
 - [ ] Freeze all source uploads, overwrites, deletes and relevant DB row writes.
-  Drain in-flight jobs; take a fresh inventory and copy/check any final delta.
-  Changed immutable files require new IDs and an updated mapping, not editing
-  an already verified checkpoint. Include source deletions in the final map.
+  Drain in-flight jobs; archive the previous snapshot and take a fresh inventory.
+  Follow [final-delta reconciliation](references/final-delta.md): dry-run the
+  changed/deleted-key plan, retire obsolete target IDs, prune only their live
+  checkpoint entries, allocate replacements and verify the exact final inventory.
+  Preserve the prior mappings and source bytes in the protected archive.
+- [ ] Before accepting target writes, implement the durable create/replace/delete
+  and reference-change journal in [rollback reconciliation](references/rollback.md).
+  All writers, including jobs, administrators and direct-client paths, must
+  participate or remain disabled. Prove replacement and deletion rollback first.
 - [ ] Switch application reads and writes and the DB reference map together.
   Release the freeze only after the access matrix and URL checks pass.
 - [ ] Monitor denied requests, missing files, gateway errors and shared usage.
-  Keep source buckets read-only and retain the original DB URL values through
-  the agreed rollback window; do not revoke source credentials prematurely.
+  Keep source buckets read-only and retain original DB URL values as recovery
+  evidence through the agreed rollback window; current references and tombstones
+  come from the journal. Do not revoke source credentials prematurely.
 
 ## 6. Roll back and retire
 
-- [ ] Freeze writes again, switch the application to the retained source release
-  and restore old references from the mapping. Reconcile target-only new files
-  back to Supabase with its supported upload API before reopening source writes;
-  never discard post-cutover uploads. See
-  [Supabase uploads](https://supabase.com/docs/reference/javascript/storage-from-upload).
-- [ ] Recheck source access and references, then resume source writers.
+- [ ] Freeze target and source writers, drain work, and reconcile every committed
+  create, replacement, deletion and reference change into the rollback destination
+  using [the journal replay procedure](references/rollback.md). Keep the freeze
+  if any operation or uncertain mutation is unresolved. Never restore all original
+  URLs unconditionally: doing so can resurrect deleted data or discard replacements.
+- [ ] Verify current source bytes, ownership, references and deletion tombstones
+  through the final journal sequence, then switch to the retained source release
+  and resume source writers. Invalidate application/CDN caches of deleted or
+  replaced files as part of that verification.
 - [ ] After successful acceptance and the rollback window, delete target copies
   only when abandoning the migration, or retire the source when keeping it.
   Target file deletion queues cleanup; bucket deletion can return 409 until

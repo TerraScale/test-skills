@@ -19,6 +19,7 @@ const items = [];
 const keys = new Set();
 for (const item of manifest) {
   if (!item.bucket || !item.name || !item.bucketId || !item.contentType || !item.userId) fail('Missing manifest field');
+  if (typeof item.userId !== 'string' || !/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(item.userId)) fail('Target owner must be a canonical ULID');
   const key = JSON.stringify([item.bucket, item.name]);
   if (keys.has(key)) fail('Duplicate source object');
   keys.add(key);

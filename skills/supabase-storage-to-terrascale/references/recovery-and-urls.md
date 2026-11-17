@@ -44,8 +44,9 @@ if (files.length !== 0) throw new Error('Expected an empty bucket');
 
 Example application schema: `profiles(id, avatar_url)` stores the original public
 URL. After migrating the application's database, add `avatar_bucket_id` and
-`avatar_file_id`. Keep `avatar_url` unchanged as the rollback value. Deploy a
-reader that prefers the IDs only when the migration switch is enabled.
+`avatar_file_id`. Keep the initial `avatar_url` as recovery evidence. Deploy a
+reader that prefers the IDs only when the migration switch is enabled; journal
+every later reference change as described in [rollback reconciliation](rollback.md).
 
 The example below is a filled single-row mapping. Set `oldUrl` from the protected
 inventory; parse Supabase URLs using URL path components and the known bucket
@@ -81,7 +82,9 @@ bounds in [SQL over HTTP](https://docs.terrascale.tech/guides/sql-http) and
 references and references shared by several rows. Never persist a target signed
 URL: `bucket.downloadUrl(id)` returns a capability valid for 60 seconds.
 
-Rollback disables the ID reader and uses retained `avatar_url` values. Preserve
-the mapping for new uploads made after cutover; upload those bytes back to their
-chosen Supabase keys and set old-format URLs before resuming source writers.
-Do not run destructive schema cleanup until the rollback window closes.
+Before rollback disables the ID reader, replay the complete post-cutover change
+journal under a write freeze using [rollback reconciliation](rollback.md). Set
+the source-format references to the resulting current files, including nulls and
+tombstones for deletions. Retained original URLs alone are insufficient: they
+may name deleted files or superseded versions. Keep both mapping generations
+and avoid destructive schema cleanup until the rollback window closes.
