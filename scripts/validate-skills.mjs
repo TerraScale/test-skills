@@ -20,7 +20,7 @@ function scalar(value) {
   }
   assert(value && !/^[\[\]{}!&*|>@`%#?:,\-]/.test(value) &&
     !/:\s|:$|\s#|[\x00-\x1f]/.test(value), "use a quoted YAML string for this scalar");
-  assert(!/^(?:null|~|true|false|[-+]?\d.*)$/i.test(value), "frontmatter values must be strings");
+  assert(!/^(?:null|~|true|false|[-+]?(?:0o[0-7]+|0x[0-9a-f]+|(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?|\.inf)|\.nan)$/i.test(value), "frontmatter values must be strings");
   return value;
 }
 
@@ -64,9 +64,56 @@ async function filesIn(folder) {
   return files;
 }
 
+function inlineProse(text) {
+  let prose = "";
+  for (let i = 0; i < text.length;) {
+    if (text[i] === "\\" && /[\\`]/.test(text[i + 1] ?? "")) {
+      prose += text.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (text[i] !== "`") {
+      prose += text[i++];
+      continue;
+    }
+    const opening = text.slice(i).match(/^`+/)[0];
+    const runs = /`+/g;
+    runs.lastIndex = i + opening.length;
+    let closing = runs.exec(text);
+    while (closing && closing[0].length !== opening.length) closing = runs.exec(text);
+    if (closing) {
+      const end = closing.index + closing[0].length;
+      prose += text.slice(i, end).replace(/[^\n]/g, " ");
+      i = end;
+    } else {
+      prose += opening;
+      i += opening.length;
+    }
+  }
+  return prose;
+}
+
+function markdownProse(markdown) {
+  let fence;
+  const text = markdown.split("\n").map(line => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = undefined;
+      }
+      return "";
+    }
+    if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
+      fence = marker[1];
+      return "";
+    }
+    return line;
+  }).join("\n");
+  return text.split(/(\n[ \t]*\n)/).map(inlineProse).join("");
+}
+
 function destinations(markdown) {
-  const text = markdown.replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1[^\n]*$/gm, "")
-    .replace(/(`+)[\s\S]*?\1/g, "");
+  const text = markdownProse(markdown);
   const targets = [];
   for (const match of text.matchAll(/\]\(\s*|^ {0,3}\[[^\]\n]+\]:\s*/gm)) {
     const rest = text.slice(match.index + match[0].length);
@@ -112,7 +159,7 @@ async function validate(folder) {
     const markdown = file === path ? body : await readFile(file, "utf8");
     for (const target of destinations(markdown)) {
       if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(target)) continue;
-      const link = decodeURIComponent(target.split(/[?#]/)[0]);
+      const link = decodeURIComponent(target.split(/[?#]/)[0].replace(/%(?![0-9a-f]{2})/gi, "%25"));
       if (!link) continue;
       const resolved = resolve(dirname(file), link);
       assert(inside(folder, resolved), `${file}: link leaves skill folder: ${target}`);
